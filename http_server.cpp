@@ -1,8 +1,13 @@
 #include <boost/asio.hpp>
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <map>
 
 using boost::asio::ip::tcp;
+
+// Include the HTTP parser header (assuming it's named http_parser.hpp)
+#include "http_parser.cpp" 
 
 class HttpSession : public std::enable_shared_from_this<HttpSession> {
 public:
@@ -11,7 +16,11 @@ public:
     void start() {
         readRequest();
         processRequest();
-        writeResponse();
+    }
+
+    void writeResponse(const HttpResponse& response) {
+        std::string response_str = response.toString();
+        boost::asio::write(socket_, boost::asio::buffer(response_str));
     }
 
 private:
@@ -23,14 +32,32 @@ private:
     }
 
     void processRequest() {
-        // Here you would parse the request and prepare an appropriate response.
-        // This is a simplified placeholder for request processing.
-    }
+        // Convert the request buffer into a string
+        std::string raw_request(boost::asio::buffer_cast<const char*>(request_.data()), request_.size());
 
-    void writeResponse() {
-        std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 14\r\n\r\nHello, world!\n";
-        boost::asio::write(socket_, boost::asio::buffer(response));
+        // Use the HttpRequest class from http_parser.hpp to parse the request
+        HttpRequest parsed_request = HttpRequest::parse(raw_request);
+
+        // Process the parsed request
+        // (This is where you'd add your custom logic based on the request)
+        // ...
+
+        // Prepare the response (this is a simple static response for demonstration)
+        HttpResponse response;
+        response.http_version = "HTTP/1.1";
+        response.status_code = "200";
+        response.status_message = "OK";
+        response.headers["Content-Type"] = "text/html";
+        response.body = "<html><body><h1>Response from C++ HTTP Server</h1></body></html>";
+
+        // Convert the response to a string and send
+        std::string response_string = response.toString();
+        boost::asio::write(socket_, boost::asio::buffer(response_string));
+
+        writeResponse(response);
+
     }
+    
 };
 
 class HttpServer {
