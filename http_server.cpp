@@ -1,91 +1,136 @@
 #include <boost/asio.hpp>
 #include <iostream>
-#include <sstream>
+#include <memory>
 #include <string>
-#include <map>
+#include <functional>
+#include "http_parser.hpp" // Ensure this includes the definitions for HttpRequest and HttpResponse
+#include "router.hpp"      // Ensure this includes the Route structure and Router class
 
 using boost::asio::ip::tcp;
 
-// Include the HTTP parser header (assuming it's named http_parser.hpp)
-#include "http_parser.cpp" 
-
-class HttpSession : public std::enable_shared_from_this<HttpSession> {
+class HttpSession : public std::enable_shared_from_this<HttpSession>
+{
 public:
-    HttpSession(tcp::socket socket) : socket_(std::move(socket)) {}
+    HttpSession(tcp::socket socket, Router &router)
+        : socket_(std::move(socket)), router_(router) {}
 
-    void start() {
+    void start()
+    {
         readRequest();
-        processRequest();
-    }
-
-    void writeResponse(const HttpResponse& response) {
-        std::string response_str = response.toString();
-        boost::asio::write(socket_, boost::asio::buffer(response_str));
     }
 
 private:
     tcp::socket socket_;
     boost::asio::streambuf request_;
+    Router &router_;
 
-    void readRequest() {
-        boost::asio::read_until(socket_, request_, "\r\n\r\n");
+    void readRequest()
+    {
+        auto self(shared_from_this());
+        boost::asio::async_read_until(socket_, request_, "\r\n\r\n",
+                                      [this, self](boost::system::error_code ec, std::size_t /*length*/)
+                                      {
+                                          if (!ec)
+                                          {
+                                              processRequest();
+                                          }
+                                      });
     }
 
-    void processRequest() {
-        // Convert the request buffer into a string
-        std::string raw_request(boost::asio::buffer_cast<const char*>(request_.data()), request_.size());
-
-        // Use the HttpRequest class from http_parser.hpp to parse the request
+    void processRequest()
+    {
+        std::string raw_request(boost::asio::buffer_cast<const char *>(request_.data()), request_.size());
         HttpRequest parsed_request = HttpRequest::parse(raw_request);
-
-        // Process the parsed request
-        // (This is where you'd add your custom logic based on the request)
-        // ...
-
-        // Prepare the response (this is a simple static response for demonstration)
         HttpResponse response;
-        response.http_version = "HTTP/1.1";
-        response.status_code = "200";
-        response.status_message = "OK";
-        response.headers["Content-Type"] = "text/html";
-        response.body = "<html><body><h1>Response from C++ HTTP Server</h1></body></html>";
 
-        // Convert the response to a string and send
-        std::string response_string = response.toString();
-        boost::asio::write(socket_, boost::asio::buffer(response_string));
+        auto result = router_.findHandler(parsed_request);
+        if (result.first)
+        {
+            result.second(parsed_request, response);
+        }
+        else
+        {
+            // No handler found: handle the 404 Not Found case
+            response.http_version = "HTTP/1.1";
+            response.status_code = "404";
+            response.status_message = "Not Found";
+            response.headers["Content-Type"] = "text/plain";
+            response.body = "404 Not Found";
+        }
 
         writeResponse(response);
-
     }
-    
+
+    void writeResponse(HttpResponse &response)
+    {
+        auto self(shared_from_this());
+        auto response_data = std::make_shared<std::string>(response.toString());
+
+        boost::asio::async_write(socket_, boost::asio::buffer(*response_data),
+                                 [this, self, response_data](boost::system::error_code ec, std::size_t /*length*/)
+                                 {
+                                     if (!ec)
+                                     {
+                                         // Close the socket (TCP connection)
+                                         boost::system::error_code ignored_ec;
+                                         socket_.shutdown(tcp::socket::shutdown_both, ignored_ec);
+                                     }
+                                 });
+    }
 };
 
-class HttpServer {
+class HttpServer
+{
 public:
-    HttpServer(boost::asio::io_context& io_context, short port) 
-        : acceptor_(io_context, tcp::endpoint(tcp::v4(), port)) {
+    HttpServer(boost::asio::io_context &io_context, short port)
+        : acceptor_(io_context, tcp::endpoint(tcp::v4(), port))
+    {
         doAccept();
+    }
+
+    void addRoute(const std::string &method, const std::string &path,
+                  std::function<void(const HttpRequest &, HttpResponse &)> handler)
+    {
+        router_.addRoute(method, path, handler);
     }
 
 private:
     tcp::acceptor acceptor_;
+    Router router_;
 
-    void doAccept() {
-        acceptor_.async_accept([this](boost::system::error_code ec, tcp::socket socket) {
+    void doAccept()
+    {
+        acceptor_.async_accept([this](boost::system::error_code ec, tcp::socket socket)
+                               {
             if (!ec) {
-                std::make_shared<HttpSession>(std::move(socket))->start();
+                std::make_shared<HttpSession>(std::move(socket), router_)->start();
             }
-            doAccept();
-        });
+            doAccept(); });
     }
 };
 
-int main() {
-    try {
+int main()
+{
+    try
+    {
         boost::asio::io_context io_context;
         HttpServer server(io_context, 8080);
+
+        // Setup routes using the public addRoute method
+        server.addRoute("GET", "/example", [](const HttpRequest &req, HttpResponse &res)
+                        {
+            res.http_version = "HTTP/1.1";
+            res.status_code = "200";
+            res.status_message = "OK";
+            res.headers["Content-Type"] = "text/plain";
+            res.body = "This is an example response."; });
+
+        // Add more routes as needed...
+
         io_context.run();
-    } catch (std::exception& e) {
+    }
+    catch (std::exception &e)
+    {
         std::cerr << "Exception: " << e.what() << "\n";
     }
 
